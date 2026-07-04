@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { motion } from "framer-motion"
 import {
   Database,
@@ -10,29 +10,68 @@ import {
   ShieldCheck,
   Activity,
   RefreshCw,
+  Loader2,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
-  telemetryRows,
-  shadowModeStats,
+  type RouteTier,
+  type TelemetryRow,
   fmtInt,
   fmtPct,
-  type RouteTier,
 } from "@/lib/cascade-data"
 
-const routeColor: Record<RouteTier, string> = {
+interface ShadowStats {
+  queriesProcessed: number
+  divergenceCount: number
+  divergencePct: number
+  threshold: number
+  requiredQueries: number
+  engaged: boolean
+}
+
+const routeColor: Record<string, string> = {
   cache: "text-[oklch(0.65_0.2_200)] bg-[oklch(0.65_0.2_200)]/15",
   local: "text-[oklch(0.72_0.18_162)] bg-[oklch(0.72_0.18_162)]/15",
   refine: "text-[oklch(0.7_0.18_295)] bg-[oklch(0.7_0.18_295)]/15",
   escalated: "text-[oklch(0.7_0.22_35)] bg-[oklch(0.7_0.22_35)]/15",
+  pass: "text-[oklch(0.72_0.18_162)] bg-[oklch(0.72_0.18_162)]/15",
+  escalate: "text-[oklch(0.7_0.22_35)] bg-[oklch(0.7_0.22_35)]/15",
 }
 
 export function TelemetrySection() {
   const [filter, setFilter] = useState("")
   const [showDivergentOnly, setShowDivergentOnly] = useState(false)
+  const [rows, setRows] = useState<TelemetryRow[]>([])
+  const [stats, setStats] = useState<ShadowStats | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
 
-  const filtered = telemetryRows.filter((r) => {
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    try {
+      const r = await fetch("/api/cascade/telemetry?limit=50")
+      const data = await r.json()
+      if (data.ok) {
+        setRows(data.rows)
+        setStats(data.stats)
+        setLastUpdated(new Date())
+      }
+    } catch (err) {
+      console.error("[telemetry] refresh failed:", err)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    refresh()
+    const t = setInterval(refresh, 15_000)
+    return () => clearInterval(t)
+  }, [refresh])
+
+  const filtered = rows.filter((r) => {
     if (showDivergentOnly && !r.divergence) return false
     if (filter) {
       const q = filter.toLowerCase()
@@ -46,8 +85,9 @@ export function TelemetrySection() {
     return true
   })
 
-  const divergencePct = shadowModeStats.divergencePct
-  const gatePassed = divergencePct <= shadowModeStats.threshold
+  const divergencePct = stats?.divergencePct ?? 0
+  const gatePassed = divergencePct <= (stats?.threshold ?? 0.2)
+  const engaged = stats?.engaged ?? false
 
   return (
     <div className="space-y-6">
@@ -103,27 +143,31 @@ export function TelemetrySection() {
                 {gatePassed ? "PASSED" : "BLOCKED"}
               </div>
               <div className="text-[11px] text-muted-foreground">
-                XGBoost engaged live
+                {engaged
+                  ? "XGBoost engaged live"
+                  : stats && stats.queriesProcessed < stats.requiredQueries
+                    ? `Need ${stats.requiredQueries - stats.queriesProcessed} more queries to engage`
+                    : "Divergence above gate — keeping fallback"}
               </div>
             </div>
           </div>
 
           <Stat
             label="Queries processed"
-            value={fmtInt(shadowModeStats.queriesProcessed)}
-            sub={`of ${shadowModeStats.requiredQueries} required`}
-            progress={shadowModeStats.queriesProcessed / shadowModeStats.requiredQueries}
+            value={fmtInt(stats?.queriesProcessed ?? 0)}
+            sub={`of ${stats?.requiredQueries ?? 50} required`}
+            progress={(stats?.queriesProcessed ?? 0) / (stats?.requiredQueries ?? 50)}
           />
           <Stat
             label="Divergence rate"
             value={fmtPct(divergencePct, 1)}
-            sub={`gate ≤ ${fmtPct(shadowModeStats.threshold, 0)}`}
-            progress={divergencePct / shadowModeStats.threshold}
+            sub={`gate ≤ ${fmtPct(stats?.threshold ?? 0.2, 0)}`}
+            progress={divergencePct / (stats?.threshold ?? 0.2)}
             invert
           />
           <Stat
             label="Divergent rows"
-            value={fmtInt(shadowModeStats.divergenceCount)}
+            value={fmtInt(stats?.divergenceCount ?? 0)}
             sub="manual spot-check required"
           />
         </div>
@@ -167,8 +211,26 @@ export function TelemetrySection() {
             Show divergent rows only
           </label>
           <div className="text-[11px] text-muted-foreground">
-            {filtered.length} of {telemetryRows.length} rows · live tail
+            {filtered.length} of {rows.length} rows ·{" "}
+            <span className="inline-flex items-center gap-1 text-[oklch(0.72_0.18_162)]">
+              <span className="h-1 w-1 rounded-full bg-current animate-pulse" />
+              live tail
+            </span>
           </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={refresh}
+            disabled={loading}
+            className="gap-1.5 h-8 text-xs"
+          >
+            {loading ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <RefreshCw className="h-3 w-3" />
+            )}
+            Refresh
+          </Button>
         </div>
       </div>
 
@@ -275,7 +337,11 @@ export function TelemetrySection() {
         </div>
         {filtered.length === 0 && (
           <div className="px-5 py-12 text-center text-sm text-muted-foreground">
-            No rows match the current filter.
+            {loading
+              ? "Loading live telemetry from SQLite…"
+              : rows.length === 0
+                ? "No telemetry yet — run a query in the Routing Sandbox to populate shadow_telemetry."
+                : "No rows match the current filter."}
           </div>
         )}
       </div>
@@ -310,7 +376,7 @@ export function TelemetrySection() {
               <BoundChip
                 label="Divergence (50q window)"
                 actual={fmtPct(divergencePct, 1)}
-                target={`≤ ${fmtPct(shadowModeStats.threshold, 0)}`}
+                target={`≤ ${fmtPct(stats?.threshold ?? 0.2, 0)}`}
                 pass={gatePassed}
               />
             </div>

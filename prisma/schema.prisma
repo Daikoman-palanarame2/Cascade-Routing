@@ -1,9 +1,6 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -13,6 +10,80 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ---------------------------------------------------------------------------
+// Free-Verify Cascade — production schema
+// ---------------------------------------------------------------------------
+
+/// Semantic cache entries (cosine ≥ 0.96 lookup hits)
+model SemanticCache {
+  id           String   @id @default(cuid())
+  task         String   @unique
+  taskHash     String   @unique
+  answer       String
+  metaConf     Float
+  tier         String   // cache | local | refine | escalated
+  tokensPaid   Int      @default(0)
+  pEasy        Float?
+  agreement    Float?
+  judgeScore   Float?
+  hitCount     Int      @default(1)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([taskHash])
+}
+
+/// Shadow-mode telemetry rows — written by AsyncTelemetryLogger
+model ShadowTelemetry {
+  id             Int      @id @default(autoincrement())
+  timestamp      DateTime @default(now())
+  tokenLen       Int
+  pEasy          Float
+  fallbackRoute  String   // cache | local | refine | escalated
+  shadowRoute    String   // cache | local | refine | escalated
+  divergence     Int      @default(0) // 0 or 1
+  didRefine      Int      @default(0) // 0 or 1
+  task           String?
+  answer         String?
+  tokensPaid     Int      @default(0)
+  durationMs     Int      @default(0)
+
+  @@index([timestamp])
+}
+
+/// Full execution traces — for the routing sandbox
+model RoutingTrace {
+  id             String   @id @default(cuid())
+  task           String
+  answer         String
+  route          String   // cache | local | refine | escalated
+  tokensPaid     Int      @default(0)
+  durationMs     Int      @default(0)
+  pEasy          Float
+  agreement      Float
+  judgeScore     Float
+  metaConfidence Float
+  didRefine      Boolean  @default(false)
+  steps          String   // JSON-serialized RoutingStep[]
+  createdAt      DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([route])
+}
+
+/// Meta-router model state (singleton row)
+model MetaRouterState {
+  id              String   @id @default("singleton")
+  isFitted        Boolean  @default(false)
+  auc             Float    @default(0)
+  brier           Float    @default(0)
+  escalationThreshold Float @default(0.65)
+  refineThreshold Float    @default(0.40)
+  engagedAt       DateTime?
+  updatedAt       DateTime @updatedAt
+}
+
+// Legacy demo models (kept for scaffold compatibility)
 model User {
   id        String   @id @default(cuid())
   email     String   @unique

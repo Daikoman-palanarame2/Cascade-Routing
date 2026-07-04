@@ -38,16 +38,24 @@ export interface RoutingStep {
 
 export interface RoutingTrace {
   task: string
+  answer: string
+  tier: RouteTier
+  tokensPaid: number
+  confidence: number
   pEasy: number
   agreement: number
   judgeScore: number
   metaConfidence: number
   didRefine: boolean
-  route: RouteTier
-  steps: RoutingStep[]
-  answer: string
-  tokensPaid: number
   durationMs: number
+  steps: RoutingStep[]
+}
+
+/** Shape returned by POST /api/cascade/solve */
+export interface SolveApiResponse {
+  ok: boolean
+  result: RoutingTrace
+  error?: string
 }
 
 export interface TelemetryRow {

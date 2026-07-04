@@ -1,5 +1,6 @@
 "use client"
 
+import { useState, useEffect } from "react"
 import { motion } from "framer-motion"
 import {
   ArrowUpRight,
@@ -29,11 +30,11 @@ import {
 import { cn } from "@/lib/utils"
 import {
   type KpiSnapshot,
+  type ServiceHealth,
   fmtInt,
   fmtPct,
   fmtUsd,
   timeSeries,
-  serviceHealth,
 } from "@/lib/cascade-data"
 
 interface OverviewProps {
@@ -42,6 +43,29 @@ interface OverviewProps {
 }
 
 export function OverviewSection({ kpi, onNavigate }: OverviewProps) {
+  const [services, setServices] = useState<ServiceHealth[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    const refresh = async () => {
+      try {
+        const r = await fetch("/api/cascade/health")
+        const data = await r.json()
+        if (!cancelled && data.ok && data.services) {
+          setServices(data.services)
+        }
+      } catch (err) {
+        console.error("[overview] health fetch failed:", err)
+      }
+    }
+    refresh()
+    const t = setInterval(refresh, 30_000)
+    return () => {
+      cancelled = true
+      clearInterval(t)
+    }
+  }, [])
+
   const routeDistribution = [
     { name: "Local Gemma 4B", value: kpi.localRoutePct, color: "oklch(0.72 0.18 162)" },
     { name: "Escalated 27B", value: kpi.escalatedRoutePct, color: "oklch(0.7 0.22 35)" },
@@ -49,8 +73,8 @@ export function OverviewSection({ kpi, onNavigate }: OverviewProps) {
     { name: "Refine + pass", value: kpi.refineRoutePct, color: "oklch(0.7 0.18 295)" },
   ]
 
-  const savingsPct = kpi.tokensSaved / kpi.tokensTotalBaseline
-  const costSavingsPct = 1 - kpi.costUsd / kpi.costUsdBaseline
+  const savingsPct = kpi.tokensTotalBaseline > 0 ? kpi.tokensSaved / kpi.tokensTotalBaseline : 0
+  const costSavingsPct = kpi.costUsdBaseline > 0 ? 1 - kpi.costUsd / kpi.costUsdBaseline : 0
 
   return (
     <div className="space-y-6">
@@ -342,7 +366,12 @@ export function OverviewSection({ kpi, onNavigate }: OverviewProps) {
           </button>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {serviceHealth.slice(0, 6).map((s) => (
+          {services.length === 0 && (
+            <div className="col-span-full text-center text-xs text-muted-foreground py-6">
+              Loading live service health…
+            </div>
+          )}
+          {services.slice(0, 6).map((s) => (
             <div
               key={s.name}
               className="rounded-lg border border-border bg-card/40 p-3.5"

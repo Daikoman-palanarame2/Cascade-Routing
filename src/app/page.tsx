@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo, useCallback, useEffect } from "react"
+import { useState, useCallback, useEffect } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import {
   LayoutDashboard,
@@ -90,22 +90,34 @@ const NAV: NavItem[] = [
 
 export default function Home() {
   const [active, setActive] = useState<SectionId>("overview")
-  // Animated KPI ticker — increments tokensSaved every 4s for a live feel.
-  const [kpiTick, setKpiTick] = useState(0)
+  const [liveKpi, setLiveKpi] = useState<KpiSnapshot | null>(null)
 
+  // Poll the live KPI endpoint every 10s so the dashboard reflects real
+  // pipeline activity from the SQLite database.
   useEffect(() => {
-    const interval = setInterval(() => setKpiTick((t) => t + 1), 4_000)
-    return () => clearInterval(interval)
+    let cancelled = false
+    const refresh = async () => {
+      try {
+        const r = await fetch("/api/cascade/stats")
+        const data = await r.json()
+        if (!cancelled && data.ok && data.kpi) {
+          setLiveKpi(data.kpi)
+        }
+      } catch (err) {
+        console.error("[page] stats fetch failed:", err)
+      }
+    }
+    refresh()
+    const t = setInterval(refresh, 10_000)
+    return () => {
+      cancelled = true
+      clearInterval(t)
+    }
   }, [])
 
-  const animatedKpi: KpiSnapshot = useMemo(() => {
-    const drift = kpiTick * 73
-    return {
-      ...kpiSnapshot,
-      tokensSaved: kpiSnapshot.tokensSaved + drift,
-      totalQueries: kpiSnapshot.totalQueries + Math.floor(kpiTick / 2),
-    }
-  }, [kpiTick])
+  // Fall back to the seed KPI snapshot if the API hasn't returned yet —
+  // keeps the UI from flickering blank on first load.
+  const animatedKpi: KpiSnapshot = liveKpi ?? kpiSnapshot
 
   const onNavigate = useCallback((id: SectionId) => setActive(id), [])
 

@@ -1,5 +1,6 @@
 "use client"
 
+import { useState, useEffect, useCallback } from "react"
 import { motion } from "framer-motion"
 import {
   Cpu,
@@ -14,28 +15,25 @@ import {
   HardDrive,
   Clock,
   Gauge,
+  RefreshCw,
+  Loader2,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
 import {
-  serviceHealth,
-  kpiSnapshot,
+  type ServiceHealth,
   fmtInt,
   fmtPct,
-  type ServiceHealth,
-  type SystemHealth,
 } from "@/lib/cascade-data"
 
-const healthIcon: Record<ServiceHealth["status"], typeof CheckCircle2> = {
+const healthIcon: Record<string, typeof CheckCircle2> = {
   healthy: CheckCircle2,
   degraded: AlertTriangle,
   offline: AlertTriangle,
   warming: Zap,
 }
 
-const serviceIconById: Record<
-  ServiceHealth["id"],
-  typeof Cpu
-> = {
+const serviceIconById: Record<string, typeof Cpu> = {
   vllm: Cpu,
   fireworks: Cloud,
   meta: ShieldCheck,
@@ -45,7 +43,53 @@ const serviceIconById: Record<
 }
 
 export function StatusSection() {
-  const allHealthy = serviceHealth.every((s) => s.status === "healthy")
+  const [services, setServices] = useState<ServiceHealth[]>([])
+  const [loading, setLoading] = useState(true)
+  const [training, setTraining] = useState(false)
+  const [metaRouter, setMetaRouter] = useState<{ isFitted: boolean; auc: number; brier: number } | null>(null)
+  const [cacheStats, setCacheStats] = useState<{ entries: number; hitRate: number } | null>(null)
+  const [telemetryStats, setTelemetryStats] = useState<{ queriesProcessed: number; divergenceCount: number } | null>(null)
+
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    try {
+      const r = await fetch("/api/cascade/health")
+      const data = await r.json()
+      if (data.ok) {
+        setServices(data.services)
+        setMetaRouter(data.metaRouter)
+        setCacheStats(data.cacheStats)
+        setTelemetryStats(data.telemetryStats)
+      }
+    } catch (err) {
+      console.error("[status] refresh failed:", err)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    refresh()
+    const t = setInterval(refresh, 30_000)
+    return () => clearInterval(t)
+  }, [refresh])
+
+  const train = useCallback(async () => {
+    setTraining(true)
+    try {
+      const r = await fetch("/api/cascade/train", { method: "POST" })
+      const data = await r.json()
+      if (data.ok) {
+        await refresh()
+      }
+    } catch (err) {
+      console.error("[status] train failed:", err)
+    } finally {
+      setTraining(false)
+    }
+  }, [refresh])
+
+  const allHealthy = services.length > 0 && services.every((s) => s.status === "healthy")
 
   return (
     <div className="space-y-6">
@@ -61,16 +105,46 @@ export function StatusSection() {
             to Fireworks rather than dropping the request.
           </p>
         </div>
-        <div
-          className={cn(
-            "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold",
-            allHealthy
-              ? "border-[oklch(0.72_0.18_162)]/30 bg-[oklch(0.72_0.18_162)]/10 text-[oklch(0.72_0.18_162)]"
-              : "border-[oklch(0.78_0.18_85)]/30 bg-[oklch(0.78_0.18_85)]/10 text-[oklch(0.78_0.18_85)]"
-          )}
-        >
-          <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" />
-          {allHealthy ? "All systems operational" : "Degraded — review below"}
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={train}
+            disabled={training}
+            className="gap-1.5"
+          >
+            {training ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <ShieldCheck className="h-3.5 w-3.5" />
+            )}
+            {training ? "Training…" : "Re-train meta-router"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={refresh}
+            disabled={loading}
+            className="gap-1.5"
+          >
+            {loading ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="h-3.5 w-3.5" />
+            )}
+            Refresh
+          </Button>
+          <div
+            className={cn(
+              "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold",
+              allHealthy
+                ? "border-[oklch(0.72_0.18_162)]/30 bg-[oklch(0.72_0.18_162)]/10 text-[oklch(0.72_0.18_162)]"
+                : "border-[oklch(0.78_0.18_85)]/30 bg-[oklch(0.78_0.18_85)]/10 text-[oklch(0.78_0.18_85)]"
+            )}
+          >
+            <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" />
+            {allHealthy ? "All systems operational" : "Degraded — review below"}
+          </div>
         </div>
       </div>
 
@@ -79,36 +153,42 @@ export function StatusSection() {
         <HealthTile
           icon={Gauge}
           label="vLLM p50 latency"
-          value="318ms"
+          value={services.find((s) => s.id === "vllm") ? `${services.find((s) => s.id === "vllm")!.latencyMs}ms` : "—"}
           sub="n=3 batch on MI300X"
           tone="free"
         />
         <HealthTile
           icon={Clock}
           label="Fireworks p95"
-          value="1.84s"
+          value={services.find((s) => s.id === "fireworks") ? `${(services.find((s) => s.id === "fireworks")!.latencyMs / 1000).toFixed(2)}s` : "—"}
           sub="prefix-cache hit rate 67%"
           tone="paid"
         />
         <HealthTile
           icon={ShieldCheck}
           label="Meta-Router fit"
-          value="AUC 0.81"
-          sub="Brier 0.13 · calibrated"
+          value={metaRouter ? `AUC ${metaRouter.auc.toFixed(2)}` : "—"}
+          sub={metaRouter ? `Brier ${metaRouter.brier.toFixed(2)} · ${metaRouter.isFitted ? "calibrated" : "warming"}` : ""}
           tone="meta"
         />
         <HealthTile
           icon={HardDrive}
-          label="SQLite size"
-          value="8.4 MB"
-          sub="8,412 cache + 67 telemetry"
+          label="Cache entries"
+          value={cacheStats ? fmtInt(cacheStats.entries) : "—"}
+          sub={cacheStats ? `hit rate ${fmtPct(cacheStats.hitRate, 1)}` : ""}
           tone="cache"
         />
       </section>
 
       {/* Service cards */}
       <section className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {serviceHealth.map((s, i) => (
+        {services.length === 0 && loading && (
+          <div className="col-span-full glass-card rounded-2xl p-12 text-center text-sm text-muted-foreground">
+            <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2" />
+            Loading live service health…
+          </div>
+        )}
+        {services.map((s, i) => (
           <ServiceCard key={s.name} service={s} index={i} />
         ))}
       </section>

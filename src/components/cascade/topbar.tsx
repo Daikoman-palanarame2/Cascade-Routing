@@ -4,7 +4,7 @@ import { useEffect, useState } from "react"
 import { Menu, X, Github, ExternalLink, Bell, Search } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
-import { kpiSnapshot, fmtInt } from "@/lib/cascade-data"
+import { fmtInt } from "@/lib/cascade-data"
 
 interface NavItem {
   id: string
@@ -21,6 +21,7 @@ interface TopbarProps {
 export function Topbar({ active, nav, onNavigate }: TopbarProps) {
   const [mobileOpen, setMobileOpen] = useState(false)
   const [now, setNow] = useState<Date | null>(null)
+  const [tokensSaved, setTokensSaved] = useState<number>(0)
   const activeItem = nav.find((n) => n.id === active)
 
   useEffect(() => {
@@ -31,6 +32,28 @@ export function Topbar({ active, nav, onNavigate }: TopbarProps) {
     setNow(new Date())
     const t = setInterval(() => setNow(new Date()), 1000)
     return () => clearInterval(t)
+  }, [])
+
+  // Poll live KPI for the tokens-saved ticker
+  useEffect(() => {
+    let cancelled = false
+    const refresh = async () => {
+      try {
+        const r = await fetch("/api/cascade/stats")
+        const data = await r.json()
+        if (!cancelled && data.ok && data.kpi) {
+          setTokensSaved(data.kpi.tokensSaved)
+        }
+      } catch {
+        // ignore
+      }
+    }
+    refresh()
+    const t = setInterval(refresh, 10_000)
+    return () => {
+      cancelled = true
+      clearInterval(t)
+    }
   }, [])
 
   return (
@@ -65,7 +88,7 @@ export function Topbar({ active, nav, onNavigate }: TopbarProps) {
             Tokens saved
           </span>
           <span className="text-sm font-mono font-semibold text-[oklch(0.72_0.18_162)] tabular-nums">
-            {fmtInt(kpiSnapshot.tokensSaved)}
+            {fmtInt(tokensSaved)}
           </span>
         </div>
 

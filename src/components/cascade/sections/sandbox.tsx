@@ -21,13 +21,11 @@ import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import {
   samplePrompts,
-  buildTrace,
   type RoutingTrace,
   type RoutingStep,
   type RouteTier,
   type SamplePrompt,
   fmtInt,
-  fmtPct,
 } from "@/lib/cascade-data"
 
 const tierStyles: Record<
@@ -92,39 +90,81 @@ export function SandboxSection() {
   const [trace, setTrace] = useState<RoutingTrace | null>(null)
   const [visibleSteps, setVisibleSteps] = useState<RoutingStep[]>([])
   const [running, setRunning] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const run = useCallback(() => {
+  const run = useCallback(async () => {
     // Cancel any in-flight animation from a previous run.
     if (timerRef.current) {
       clearTimeout(timerRef.current)
       timerRef.current = null
     }
     setRunning(true)
+    setError(null)
     setVisibleSteps([])
     setTrace(null)
-    const full = buildTrace(prompt, cached)
-    // Reveal steps one by one for the cascade feel.
-    let i = 0
-    const tick = () => {
-      if (i >= full.steps.length) {
-        setTrace(full)
-        setRunning(false)
-        return
+
+    // Show "calling backend" placeholder step while the pipeline runs.
+    setVisibleSteps([
+      {
+        id: "calling",
+        label: "Calling /api/cascade/solve",
+        tier: "input",
+        detail: "POST to Next.js API → pipeline.solve() → SQLite + LLM",
+        tokensPaid: 0,
+        durationMs: 0,
+        status: "active",
+      },
+    ])
+
+    try {
+      const response = await fetch("/api/cascade/solve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task: customTask, forceCache: cached }),
+      })
+      const data = await response.json()
+      if (!data.ok) {
+        throw new Error(data.error || "Pipeline returned !ok")
       }
-      const nextStep = full.steps[i]
-      if (!nextStep) {
-        // Defensive — should never happen, but guard against undefined slots.
+      const full: RoutingTrace = data.result
+      // Drop the placeholder, then reveal real steps one by one.
+      setVisibleSteps([])
+      let i = 0
+      const tick = () => {
+        if (i >= full.steps.length) {
+          setTrace(full)
+          setRunning(false)
+          return
+        }
+        const nextStep = full.steps[i]
+        if (!nextStep) {
+          i += 1
+          timerRef.current = setTimeout(tick, 240)
+          return
+        }
+        setVisibleSteps((prev) => [...prev, nextStep])
         i += 1
-        timerRef.current = setTimeout(tick, 480)
-        return
+        timerRef.current = setTimeout(tick, 320)
       }
-      setVisibleSteps((prev) => [...prev, nextStep])
-      i += 1
-      timerRef.current = setTimeout(tick, 480)
+      tick()
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(msg)
+      setRunning(false)
+      setVisibleSteps([
+        {
+          id: "error",
+          label: "Pipeline error",
+          tier: "meta",
+          detail: msg.slice(0, 120),
+          tokensPaid: 0,
+          durationMs: 0,
+          status: "fail",
+        },
+      ])
     }
-    tick()
-  }, [prompt, cached])
+  }, [customTask, cached])
 
   const reset = useCallback(() => {
     if (timerRef.current) clearTimeout(timerRef.current)
@@ -158,9 +198,13 @@ export function SandboxSection() {
           </p>
         </div>
         <div className="flex items-center gap-2 text-[11px]">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-[oklch(0.72_0.18_162)]/30 bg-[oklch(0.72_0.18_162)]/10 px-2.5 py-1 font-semibold text-[oklch(0.72_0.18_162)]">
+            <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" />
+            LIVE backend
+          </span>
           <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card/60 px-2.5 py-1">
             <span className="h-1.5 w-1.5 rounded-full bg-[oklch(0.72_0.18_162)] animate-pulse" />
-            vLLM online
+            vLLM (z-ai SDK)
           </span>
           <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card/60 px-2.5 py-1">
             <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
@@ -281,7 +325,7 @@ export function SandboxSection() {
               />
               <Readout
                 label="Meta-conf"
-                value={trace.metaConfidence > 0 ? trace.metaConfidence.toFixed(2) : "—"}
+                value={trace.confidence > 0 ? trace.confidence.toFixed(2) : "—"}
                 tone="meta"
               />
             </motion.div>
@@ -343,15 +387,15 @@ export function SandboxSection() {
                     <CheckCircle2
                       className={cn(
                         "h-4 w-4",
-                        trace.route === "escalated"
+                        trace.tier === "escalated"
                           ? "text-[oklch(0.7_0.22_35)]"
                           : "text-[oklch(0.72_0.18_162)]"
                       )}
                     />
                     <span className="text-xs font-semibold uppercase tracking-wider">
                       Final answer · routed via{" "}
-                      <span className={routeTextColor(trace.route)}>
-                        {routeLabel(trace.route)}
+                      <span className={routeTextColor(trace.tier)}>
+                        {routeLabel(trace.tier)}
                       </span>
                     </span>
                   </div>

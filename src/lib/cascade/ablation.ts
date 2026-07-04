@@ -107,13 +107,14 @@ Score how factually correct and complete the response is compared to the referen
 
 Reply with ONLY a single decimal number 0.0-1.0, nothing else.`
 
+  // Judge uses the LOCAL tier — it's a free call (local tokens = 0)
   const r = await llm.generate({
     systemPrompt:
       "You are a strict but fair grader. Compare the response to the reference answer and return only a decimal score.",
     userPrompt,
     temperature: 0.0,
     maxTokens: 16,
-  })
+  }, "local")
 
   const text = r.text.trim()
   const match = text.match(/([01](?:\.\d+)?|0?\.\d+)/)

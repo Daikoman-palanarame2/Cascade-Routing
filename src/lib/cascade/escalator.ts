@@ -1,14 +1,16 @@
 /**
  * EnrichedRemoteEscalator — the paid Fireworks 27B tier.
  *
- * v2 upgrades:
- *   1. Tighter token budget — max 400 tokens (was 512)
- *   2. Explicit conciseness instruction in system prompt
+ * v3 upgrades:
+ *   1. Uses tier-aware LLM client (Fireworks in production, z-ai in simulation)
+ *   2. Tighter token budget — max 400 tokens
  *   3. Includes local agreement + selfVerify result in hand-off
- *   4. If local was correct, asks remote to confirm in ONE sentence
+ *   4. Prefix-stable prompt structure for Fireworks prefix-cache (50% discount)
  *
  * The system prompt is INVARIANT across all escalations so the
- * Fireworks prefix-cache hash stays stable (50% input discount).
+ * Fireworks prefix-cache hash stays stable.
+ *
+ * PAID TOKENS — these count toward the hackathon score.
  */
 
 import { getLLM, type LLMResponse } from "./llm-client"
@@ -17,13 +19,13 @@ export interface EscalateParams {
   task: string
   localAttempt: string
   critique: string
-  agreement?: number // local n=3 agreement
-  selfVerify?: boolean | null // local self-verify result
+  agreement?: number
+  selfVerify?: boolean | null
 }
 
 export interface EscalateResult {
   answer: string
-  tokensPaid: number
+  tokensPaid: number // REAL billable tokens (cached at 50%)
   durationMs: number
   raw: LLMResponse
 }
@@ -40,9 +42,7 @@ export class EnrichedRemoteEscalator {
     const start = Date.now()
 
     const agreementStr =
-      params.agreement !== undefined
-        ? `${params.agreement.toFixed(2)}`
-        : "N/A"
+      params.agreement !== undefined ? `${params.agreement.toFixed(2)}` : "N/A"
     const verifyStr =
       params.selfVerify === true
         ? "YES (local confirmed)"
@@ -64,16 +64,17 @@ export class EnrichedRemoteEscalator {
       params.task,
     ].join("\n")
 
-    const response = await llm.generate({
+    // REMOTE tier — PAID TOKENS
+    const response = await llm.remote({
       systemPrompt: SENIOR_SYSTEM_PROMPT,
       userPrompt,
       temperature: 0.0,
-      maxTokens: 400, // tight cap
+      maxTokens: 400,
     })
 
     return {
       answer: response.text.trim(),
-      tokensPaid: response.totalTokens,
+      tokensPaid: response.costTokens, // real billable tokens
       durationMs: Date.now() - start,
       raw: response,
     }

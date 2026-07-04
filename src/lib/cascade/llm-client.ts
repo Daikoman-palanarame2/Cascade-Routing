@@ -8,6 +8,10 @@
  * In production these would be two separate HTTP clients (vLLM on
  * localhost:8000 for local, Fireworks REST for remote). The shape of
  * the response is identical so the pipeline code doesn't change.
+ *
+ * Includes a global concurrency limiter + retry-with-backoff so the
+ * ablation harness (which fires 100+ calls in quick succession) doesn't
+ * trip the z-ai API's 429 rate limit.
  */
 
 import ZAI, { type ChatMessage } from "z-ai-web-dev-sdk"
@@ -45,6 +49,39 @@ export function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4))
 }
 
+// ---------------------------------------------------------------------------
+// Concurrency limiter — max 2 concurrent LLM calls, plus a 800ms gap between
+// calls to stay under the z-ai free-tier rate limit.
+// ---------------------------------------------------------------------------
+
+const MAX_CONCURRENT = 2
+const MIN_GAP_MS = 800
+let _active = 0
+const _queue: Array<() => void> = []
+let _lastCallAt = 0
+
+async function acquireSlot(): Promise<void> {
+  while (_active >= MAX_CONCURRENT) {
+    await new Promise<void>((resolve) => _queue.push(resolve))
+  }
+  _active++
+  // Enforce minimum gap between calls to avoid bursts
+  const now = Date.now()
+  const wait = Math.max(0, _lastCallAt + MIN_GAP_MS - now)
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait))
+  _lastCallAt = Date.now()
+}
+
+function releaseSlot(): void {
+  _active--
+  const next = _queue.shift()
+  if (next) next()
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
 export class LLMClient {
   async generate(req: LLMRequest): Promise<LLMResponse> {
     const start = Date.now()
@@ -55,30 +92,58 @@ export class LLMClient {
       { role: "user", content: req.userPrompt },
     ]
 
-    try {
-      const response = await client.chat.completions.create({
-        messages,
-        stream: false,
-        thinking: { type: "disabled" },
-        temperature: req.temperature ?? 0.0,
-        max_tokens: req.maxTokens ?? 1024,
-      })
+    // Retry with exponential backoff on 429 / 5xx
+    // 5 attempts: 2s, 4s, 8s, 16s = 30s total max backoff
+    const MAX_RETRIES = 5
+    let lastErr: unknown = null
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      await acquireSlot()
+      try {
+        const response = await client.chat.completions.create({
+          messages,
+          stream: false,
+          thinking: { type: "disabled" },
+          temperature: req.temperature ?? 0.0,
+          max_tokens: req.maxTokens ?? 1024,
+        })
 
-      const text = response.choices?.[0]?.message?.content ?? ""
-      const promptTokens = estimateTokens(req.systemPrompt + req.userPrompt)
-      const completionTokens = estimateTokens(text)
-      return {
-        text,
-        promptTokens,
-        completionTokens,
-        totalTokens: promptTokens + completionTokens,
-        durationMs: Date.now() - start,
+        const text = response.choices?.[0]?.message?.content ?? ""
+        const promptTokens = estimateTokens(
+          req.systemPrompt + req.userPrompt,
+        )
+        const completionTokens = estimateTokens(text)
+        return {
+          text,
+          promptTokens,
+          completionTokens,
+          totalTokens: promptTokens + completionTokens,
+          durationMs: Date.now() - start,
+        }
+      } catch (err) {
+        lastErr = err
+        const msg = err instanceof Error ? err.message : String(err)
+        // Retry on 429 (rate limit) or 5xx (server error)
+        const retryable =
+          msg.includes("429") ||
+          msg.includes("Too many requests") ||
+          msg.includes("503") ||
+          msg.includes("502") ||
+          msg.includes("500")
+        if (!retryable || attempt === MAX_RETRIES) {
+          throw new Error(`LLM generate failed: ${msg}`)
+        }
+        // Exponential backoff: 2s, 4s, 8s, 16s, 32s
+        const backoff = Math.min(32000, 2000 * Math.pow(2, attempt))
+        await sleep(backoff)
+      } finally {
+        releaseSlot()
       }
-    } catch (err) {
-      // Re-throw with context — caller's exception guard will escalate
-      const message = err instanceof Error ? err.message : String(err)
-      throw new Error(`LLM generate failed: ${message}`)
     }
+    throw new Error(
+      `LLM generate failed after ${MAX_RETRIES + 1} attempts: ${
+        lastErr instanceof Error ? lastErr.message : String(lastErr)
+      }`,
+    )
   }
 }
 

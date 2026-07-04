@@ -83,6 +83,42 @@ model MetaRouterState {
   updatedAt       DateTime @updatedAt
 }
 
+/// Ablation runs — one per execution of the harness
+model AblationRun {
+  id           String   @id @default(cuid())
+  status       String   @default("running") // running | completed | failed
+  progress     Int      @default(0) // 0..100
+  totalQueries Int      @default(20)
+  conditionsDone Json?
+  error        String?
+  startedAt    DateTime @default(now())
+  completedAt  DateTime?
+
+  queries      AblationQuery[]
+
+  @@index([startedAt])
+}
+
+/// Per-query ablation results — one row per (run, condition, query)
+model AblationQuery {
+  id              String   @id @default(cuid())
+  runId           String
+  run             AblationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  condition       String   // baseline | cache | earlyExit | cisc | metaRouter
+  queryIndex      Int
+  task            String
+  referenceAnswer String
+  response        String
+  paid            Int      @default(0)
+  accurate        Boolean  @default(false)
+  score           Float    @default(0) // 0..1 from LLM judge
+  durationMs      Int      @default(0)
+  createdAt       DateTime @default(now())
+
+  @@index([runId, condition])
+  @@index([condition])
+}
+
 // Legacy demo models (kept for scaffold compatibility)
 model User {
   id        String   @id @default(cuid())

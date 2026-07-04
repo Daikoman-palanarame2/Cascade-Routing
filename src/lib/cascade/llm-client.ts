@@ -50,12 +50,12 @@ export function estimateTokens(text: string): number {
 }
 
 // ---------------------------------------------------------------------------
-// Concurrency limiter — max 2 concurrent LLM calls, plus a 800ms gap between
+// Concurrency limiter — max 1 concurrent LLM call, plus a 1200ms gap between
 // calls to stay under the z-ai free-tier rate limit.
 // ---------------------------------------------------------------------------
 
-const MAX_CONCURRENT = 2
-const MIN_GAP_MS = 800
+const MAX_CONCURRENT = 1
+const MIN_GAP_MS = 1200
 let _active = 0
 const _queue: Array<() => void> = []
 let _lastCallAt = 0

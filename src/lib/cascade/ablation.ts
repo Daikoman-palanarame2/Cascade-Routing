@@ -23,10 +23,15 @@
 import { db } from "@/lib/db"
 import { evalSet, type EvalQuery } from "./eval-set"
 import { getLLM, estimateTokens } from "./llm-client"
-import { predictPEasy } from "./local-model"
+import { predictPEasy, difficultyTier } from "./difficulty"
+import {
+  localSingleShot,
+  localCISC,
+  localRefine,
+  selfVerify,
+} from "./local-model"
 import { getCache } from "./cache"
 import { getMetaRouter } from "./meta-router"
-import { getLocalModel } from "./local-model"
 import { getEscalator } from "./escalator"
 
 export type Condition = "baseline" | "cache" | "earlyExit" | "cisc" | "metaRouter"
@@ -215,13 +220,12 @@ async function runEarlyExit(q: EvalQuery): Promise<QueryOutcome> {
       route: "escalated",
     }
   }
-  // Easy query — run local single-shot (no CISC, no meta-router)
-  const local = getLocalModel()
-  const r = await local.verify(q.task, pEasy)
+  // Easy query — local single-shot (no CISC, no meta-router)
+  const r = await localSingleShot(q.task)
   await cache.store({
     task: q.task,
     answer: r.answer,
-    metaConf: 0.75, // assume medium confidence since no judge
+    metaConf: 0.75,
     tier: "local",
     tokensPaid: 0,
     pEasy,
@@ -229,7 +233,7 @@ async function runEarlyExit(q: EvalQuery): Promise<QueryOutcome> {
   })
   return {
     response: r.answer,
-    tokensPaid: 0, // local is free
+    tokensPaid: 0,
     durationMs: Date.now() - start,
     route: "local",
   }
@@ -270,19 +274,18 @@ async function runCisc(q: EvalQuery): Promise<QueryOutcome> {
       route: "escalated",
     }
   }
-  // Local + CISC n=3 (we already do n=3 in verify()).
-  // For +CISC condition: judge the answer; if judge < 3, escalate.
-  // (This is the agreement + judge signal without the meta-classifier.)
-  const local = getLocalModel()
-  const r = await local.verify(q.task, pEasy)
-  const judgeScore = await local.judge(q.task, r.answer)
-  if (judgeScore < 3) {
-    // Refine failed judge — escalate with hand-off
+  // Local + CISC n=3 + self-verify (agreement + verify signal, no meta-classifier)
+  const r = await localCISC(q.task)
+  const verified = await selfVerify(q.task, r.answer)
+  if (!verified) {
+    // Self-verify failed — escalate with hand-off
     const esc = getEscalator()
     const e = await esc.escalate({
       task: q.task,
       localAttempt: r.answer,
-      critique: `CISC judge ${judgeScore}/5 < 3 — escalating with hand-off`,
+      critique: `CISC self-verify NO (agreement ${r.agreement.toFixed(2)})`,
+      agreement: r.agreement,
+      selfVerify: false,
     })
     await cache.store({
       task: q.task,
@@ -292,7 +295,7 @@ async function runCisc(q: EvalQuery): Promise<QueryOutcome> {
       tokensPaid: e.tokensPaid,
       pEasy,
       agreement: r.agreement,
-      judgeScore,
+      judgeScore: 1,
     })
     return {
       response: e.answer,
@@ -309,7 +312,7 @@ async function runCisc(q: EvalQuery): Promise<QueryOutcome> {
     tokensPaid: 0,
     pEasy,
     agreement: r.agreement,
-    judgeScore,
+    judgeScore: 5,
   })
   return {
     response: r.answer,
@@ -354,16 +357,53 @@ async function runMetaRouter(q: EvalQuery): Promise<QueryOutcome> {
       route: "escalated",
     }
   }
-  // Full cascade: local + CISC + judge + meta-classifier
-  const local = getLocalModel()
+  // Full cascade: CISC n=3 + self-verify + meta-classifier
   const router = getMetaRouter()
-  const r = await local.verify(q.task, pEasy)
+  const tier = difficultyTier(pEasy)
+
+  // Easy → single-shot + self-verify
+  if (tier === "easy") {
+    const r = await localSingleShot(q.task)
+    const verified = await selfVerify(q.task, r.answer)
+    if (verified) {
+      await cache.store({
+        task: q.task, answer: r.answer, metaConf: 0.90,
+        tier: "local", tokensPaid: 0, pEasy, agreement: 1.0, judgeScore: 5,
+      })
+      return {
+        response: r.answer, tokensPaid: 0,
+        durationMs: Date.now() - start, route: "local",
+      }
+    }
+    // Self-verify failed → escalate
+    const esc = getEscalator()
+    const e = await esc.escalate({
+      task: q.task, localAttempt: r.answer,
+      critique: "Easy query but self-verify rejected",
+      agreement: 1.0, selfVerify: false,
+    })
+    await cache.store({
+      task: q.task, answer: e.answer, metaConf: 1.0,
+      tier: "escalated", tokensPaid: e.tokensPaid, pEasy, agreement: 1.0, judgeScore: 1,
+    })
+    return {
+      response: e.answer, tokensPaid: e.tokensPaid,
+      durationMs: Date.now() - start, route: "escalated",
+    }
+  }
+
+  // Medium → CISC + self-verify + meta-classifier
+  const r = await localCISC(q.task)
   let draft = r.answer
-  let judgeScore = await local.judge(q.task, draft)
+  let verified = await selfVerify(q.task, draft)
+  const tokenLen = estimateTokens(q.task)
+  let ratio = Math.min(1, estimateTokens(draft) / (tokenLen * 4))
   let metaConf = await router.predictConfidence({
     pEasy,
     agreement: r.agreement,
-    judgeScore,
+    selfVerify: verified ? 1.0 : 0.0,
+    answerLenRatio: ratio,
+    judgeScore: verified ? 5 : 1,
     isRefined: false,
   })
   let route = await router.route(metaConf)
@@ -371,13 +411,16 @@ async function runMetaRouter(q: EvalQuery): Promise<QueryOutcome> {
 
   if (route === "refine") {
     didRefine = true
-    const refined = await local.refine(q.task, draft)
+    const refined = await localRefine(q.task, draft)
     draft = refined.answer
-    judgeScore = await local.judge(q.task, draft)
+    verified = await selfVerify(q.task, draft)
+    ratio = Math.min(1, estimateTokens(draft) / (tokenLen * 4))
     metaConf = await router.predictConfidence({
       pEasy,
       agreement: refined.agreement,
-      judgeScore,
+      selfVerify: verified ? 1.0 : 0.0,
+      answerLenRatio: ratio,
+      judgeScore: verified ? 5 : 1,
       isRefined: true,
     })
     route = await router.route(metaConf)
@@ -385,20 +428,14 @@ async function runMetaRouter(q: EvalQuery): Promise<QueryOutcome> {
 
   if (route === "pass") {
     await cache.store({
-      task: q.task,
-      answer: draft,
-      metaConf,
+      task: q.task, answer: draft, metaConf,
       tier: didRefine ? "refine" : "local",
-      tokensPaid: 0,
-      pEasy,
-      agreement: r.agreement,
-      judgeScore,
+      tokensPaid: 0, pEasy, agreement: r.agreement,
+      judgeScore: verified ? 5 : 1,
     })
     return {
-      response: draft,
-      tokensPaid: 0,
-      durationMs: Date.now() - start,
-      route: didRefine ? "refined" : "local",
+      response: draft, tokensPaid: 0,
+      durationMs: Date.now() - start, route: didRefine ? "refined" : "local",
     }
   }
   // route === "escalate"
@@ -406,7 +443,9 @@ async function runMetaRouter(q: EvalQuery): Promise<QueryOutcome> {
   const e = await esc.escalate({
     task: q.task,
     localAttempt: draft,
-    critique: `Meta-router conf ${metaConf.toFixed(2)} < 0.40`,
+    critique: `Meta-router conf ${metaConf.toFixed(2)} < threshold`,
+    agreement: r.agreement,
+    selfVerify: verified,
   })
   await cache.store({
     task: q.task,
@@ -416,7 +455,7 @@ async function runMetaRouter(q: EvalQuery): Promise<QueryOutcome> {
     tokensPaid: e.tokensPaid,
     pEasy,
     agreement: r.agreement,
-    judgeScore,
+    judgeScore: verified ? 5 : 1,
   })
   return {
     response: e.answer,

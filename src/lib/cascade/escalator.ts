@@ -1,14 +1,14 @@
 /**
- * EnrichedRemoteEscalator — TypeScript port of the Python escalator.
+ * EnrichedRemoteEscalator — the paid Fireworks 27B tier.
  *
- * Escalates to the "remote" Gemma 3 27B model (here: z-ai SDK with a
- * senior-prompt) carrying the enriched context: junior attempt + critique.
+ * v2 upgrades:
+ *   1. Tighter token budget — max 400 tokens (was 512)
+ *   2. Explicit conciseness instruction in system prompt
+ *   3. Includes local agreement + selfVerify result in hand-off
+ *   4. If local was correct, asks remote to confirm in ONE sentence
  *
- * CRITICAL — prefix-stable prompt structure:
- *   System prompt is invariant across all escalations so the Fireworks
- *   prefix-cache hash stays stable (50% input discount). Dynamic
- *   runtime data (junior attempt, critique, user query) is pushed to
- *   the BOTTOM of the user payload.
+ * The system prompt is INVARIANT across all escalations so the
+ * Fireworks prefix-cache hash stays stable (50% input discount).
  */
 
 import { getLLM, type LLMResponse } from "./llm-client"
@@ -17,6 +17,8 @@ export interface EscalateParams {
   task: string
   localAttempt: string
   critique: string
+  agreement?: number // local n=3 agreement
+  selfVerify?: boolean | null // local self-verify result
 }
 
 export interface EscalateResult {
@@ -26,23 +28,37 @@ export interface EscalateResult {
   raw: LLMResponse
 }
 
-// System prompt is INVARIANT — keeps Fireworks prefix-cache hash stable
-const SENIOR_SYSTEM_PROMPT = `You are a senior AI assistant. Review the junior model's attempt and critique, then provide the correct, final answer. Be accurate, complete, and concise. If the junior attempt was correct, confirm it. If it was wrong or incomplete, provide the correct answer with brief reasoning. Keep responses under 250 words.`
+const SENIOR_SYSTEM_PROMPT = `You are a senior AI assistant. Review the junior model's attempt and confidence signals, then provide the correct final answer. Rules:
+- If the junior attempt is correct, confirm it in ONE sentence.
+- If the junior attempt is wrong or incomplete, provide the correct answer in under 100 words.
+- Do not restate the question. Do not hedge. Be definitive.
+- If the junior self-verified as YES, lean toward confirming. If NO, override completely.`
 
 export class EnrichedRemoteEscalator {
   async escalate(params: EscalateParams): Promise<EscalateResult> {
     const llm = getLLM()
     const start = Date.now()
 
-    // Format user payload with dynamic content pushed to the bottom
-    // so previous instruction chunks match cache line boundaries
+    const agreementStr =
+      params.agreement !== undefined
+        ? `${params.agreement.toFixed(2)}`
+        : "N/A"
+    const verifyStr =
+      params.selfVerify === true
+        ? "YES (local confirmed)"
+        : params.selfVerify === false
+          ? "NO (local rejected)"
+          : "N/A"
+
     const userPrompt = [
-      `INSTRUCTION: Resolve the query completely.`,
+      `INSTRUCTION: Resolve the query completely. Be concise.`,
       `JUNIOR ATTEMPT:`,
       params.localAttempt || "(no local attempt was made)",
       ``,
-      `JUNIOR CRITIQUE:`,
-      params.critique,
+      `JUNIOR CONFIDENCE SIGNALS:`,
+      `  n=3 agreement: ${agreementStr}`,
+      `  self-verify: ${verifyStr}`,
+      `  critique: ${params.critique}`,
       ``,
       `USER QUERY:`,
       params.task,
@@ -52,7 +68,7 @@ export class EnrichedRemoteEscalator {
       systemPrompt: SENIOR_SYSTEM_PROMPT,
       userPrompt,
       temperature: 0.0,
-      maxTokens: 512,
+      maxTokens: 400, // tight cap
     })
 
     return {

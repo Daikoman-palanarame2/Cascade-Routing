@@ -51,7 +51,7 @@ async function judgeResponse(query: LargeEvalQuery, response: string): Promise<n
     systemPrompt: JUDGE_PROMPT,
     userPrompt: `Reference: ${query.referenceAnswer}\n\nResponse: ${response}\n\nScore 0.0-1.0:`,
     temperature: 0.0,
-    maxTokens: 16,
+    maxTokens: 256,
   })
   const match = r.text.match(/([01](?:\.\d+)?|0?\.\d+)/)
   return match ? Math.max(0, Math.min(1, parseFloat(match[1]))) : 0

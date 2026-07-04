@@ -51,7 +51,7 @@ export async function localCISC(task: string): Promise<LocalResult> {
       systemPrompt: "You are a correctness validator. Output YES or NO.",
       userPrompt: pTrueUserPrompt,
       temperature: 0.0,
-      maxTokens: 4,
+      maxTokens: 256,
     })
     const isYes = probeResponse.text.trim().toUpperCase().startsWith("YES") ? 1.0 : 0.0
 
@@ -108,7 +108,7 @@ export async function selfVerify(task: string, answer: string): Promise<boolean>
     systemPrompt: "You are a correctness validator. Output YES or NO.",
     userPrompt,
     temperature: 0.0,
-    maxTokens: 4,
+    maxTokens: 256,
   })
   const text = response.text.trim().toUpperCase()
   return text.startsWith("YES")

@@ -28,6 +28,8 @@
 import ZAI, { type ChatMessage } from "z-ai-web-dev-sdk"
 import { vllmGenerate } from "./vllm-client"
 import { fireworksGenerate } from "./fireworks-client"
+import fs from "fs"
+import path from "path"
 
 export type LLMTier = "local" | "remote"
 
@@ -66,7 +68,22 @@ export function estimateTokens(text: string): number {
 let _zai: Awaited<ReturnType<typeof ZAI.create>> | null = null
 
 async function getZai() {
-  if (!_zai) _zai = await ZAI.create()
+  if (!_zai) {
+    const zaiKey = process.env.ZAI_API_KEY
+    if (zaiKey) {
+      const configPath = path.join(process.cwd(), ".z-ai-config")
+      if (!fs.existsSync(configPath)) {
+        fs.writeFileSync(
+          configPath,
+          JSON.stringify({
+            baseUrl: "https://api.z.ai/api/paas/v4",
+            apiKey: zaiKey,
+          }, null, 2)
+        )
+      }
+    }
+    _zai = await ZAI.create()
+  }
   return _zai
 }
 

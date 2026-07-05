@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cascade-routing-app
+    restart: unless-stopped
+    ports:
+      # Map host port 8080 to container port 81 (Caddy reverse proxy)
+      - "8080:81"
+    volumes:
+      # Mount local db folder to /app/db to ensure SQLite persistence
+      - ./db:/app/db
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=file:/app/db/custom.db
+      - PORT=3000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
